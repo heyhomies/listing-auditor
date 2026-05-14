@@ -222,7 +222,8 @@ def main():
     with st.sidebar:
         st.subheader("⚙️ Konfiguration")
 
-        api_key = st.text_input("Anthropic API Key", type="password")
+        default_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
+        api_key = st.text_input("Anthropic API Key", value=default_key, type="password")
 
         model_options = {
             "Claude Sonnet 4.6 (Empfohlen)": "claude-sonnet-4-6",
