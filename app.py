@@ -137,13 +137,18 @@ def process_asin(asin: str, base_url: str, client, model: str, fields: dict) -> 
     if is_ean:
         result["EAN"] = asin
 
-    if fields.get("listing"):
+    if fields.get("title"):
         result["Live Titel"] = scraped["title"]
+
+    if fields.get("bullets"):
         result["Live Bullet 1"] = bullets[0]
         result["Live Bullet 2"] = bullets[1]
         result["Live Bullet 3"] = bullets[2]
         result["Live Bullet 4"] = bullets[3]
         result["Live Bullet 5"] = bullets[4]
+
+    if fields.get("desc"):
+        result["Beschreibung"] = scraped["description"]
 
     if fields.get("ratings"):
         result["Anzahl Bewertungen"] = scraped["review_count"]
@@ -239,14 +244,18 @@ def main():
                                      help="Max. 2 empfohlen um Amazon-Blocks zu vermeiden")
 
         st.subheader("📋 Output-Felder")
-        field_listing = st.checkbox("Listing-Inhalte (Titel, Bullets)", value=True)
+        field_title   = st.checkbox("Titel", value=True)
+        field_bullets = st.checkbox("Bullet Points", value=True)
+        field_desc    = st.checkbox("Beschreibung", value=True)
         field_ratings = st.checkbox("Bewertungen (Anzahl, Ø Sterne)", value=True)
         field_offer   = st.checkbox("Angebot (Preis, Verkäufer)", value=True)
         field_media   = st.checkbox("Präsentation (Galeriebilder, A+)", value=True)
         field_cosmo   = st.checkbox("COSMO-Analyse (Score + Empfehlungen)", value=True)
 
         fields = {
-            "listing": field_listing,
+            "title":   field_title,
+            "bullets": field_bullets,
+            "desc":    field_desc,
             "ratings": field_ratings,
             "offer":   field_offer,
             "media":   field_media,
@@ -321,8 +330,8 @@ def main():
         st.info("ℹ️ COSMO-Analyse deaktiviert — kein API Key erforderlich.")
 
     if not st.button(f"🚀 {len(identifiers)} {label} analysieren",
-                     disabled=(field_cosmo and not api_key)):
-        if field_cosmo and not api_key:
+                     disabled=(fields.get("cosmo") and not api_key)):
+        if fields.get("cosmo") and not api_key:
             st.warning("Bitte API Key in der Sidebar eingeben (für COSMO-Analyse benötigt).")
         return
 
@@ -387,10 +396,13 @@ def main():
     has_ean_input = any(r.get("is_ean") for r in success_results)
     first_cols = ["EAN", "ASIN"] if has_ean_input else ["ASIN"]
     optional_cols = []
-    if fields.get("listing"):
-        optional_cols += ["Live Titel",
-                          "Live Bullet 1", "Live Bullet 2", "Live Bullet 3",
+    if fields.get("title"):
+        optional_cols += ["Live Titel"]
+    if fields.get("bullets"):
+        optional_cols += ["Live Bullet 1", "Live Bullet 2", "Live Bullet 3",
                           "Live Bullet 4", "Live Bullet 5"]
+    if fields.get("desc"):
+        optional_cols += ["Beschreibung"]
     if fields.get("ratings"):
         optional_cols += ["Anzahl Bewertungen", "Bewertungsschnitt"]
     if fields.get("offer"):
