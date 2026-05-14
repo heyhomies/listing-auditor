@@ -426,15 +426,9 @@ def main():
             length = max((len(str(cell.value or "")) for cell in col_cells), default=10)
             ws.column_dimensions[col_cells[0].column_letter].width = min(length + 2, 60)
 
-    # ── Save to output folder ─────────────────────────────────────────────────
     import datetime
-    output_dir = Path(__file__).parent / "output"
-    output_dir.mkdir(exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"asin_audit_{marketplace.replace('.', '_')}_{timestamp}.xlsx"
-    output_path = output_dir / filename
-    output_path.write_bytes(output.getvalue())
-    st.success(f"💾 Ergebnis gespeichert: `listing_auditor/output/{filename}`")
 
     st.download_button(
         "📥 Excel-Report herunterladen",
