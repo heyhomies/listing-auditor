@@ -413,143 +413,145 @@ def scrape_asin(asin: str, base_url: str) -> dict:
     return result
 
 
-# ── Idealo Scraper ────────────────────────────────────────────────────────────
+# ── Idealo Scraper (Playwright) ───────────────────────────────────────────────
+# Requires: pip install playwright && playwright install chromium
 
-_idealo_session = None
+_pw_instance = None
+_idealo_browser = None
 
 
-def _get_idealo_session() -> requests.Session:
-    """Return a warmed-up Idealo session (singleton, created once per process)."""
-    global _idealo_session
-    if _idealo_session is not None:
-        return _idealo_session
-
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0",
-        "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"macOS"',
-    })
-    # Warm up: visit homepage to get cookies (consent etc.)
+def _get_idealo_browser():
+    """Return a persistent Chromium browser instance (created once per process)."""
+    global _pw_instance, _idealo_browser
+    if _idealo_browser is not None:
+        try:
+            if _idealo_browser.is_connected():
+                return _idealo_browser, None
+        except Exception:
+            pass
     try:
-        session.get("https://www.idealo.de", timeout=15)
-        time.sleep(random.uniform(1.0, 2.0))
-    except Exception:
-        pass
-    _idealo_session = session
-    return session
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None, "playwright nicht installiert — bitte ausführen: pip install playwright && playwright install chromium"
+    try:
+        if _pw_instance is not None:
+            try:
+                _pw_instance.stop()
+            except Exception:
+                pass
+        _pw_instance = sync_playwright().start()
+        _idealo_browser = _pw_instance.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        return _idealo_browser, None
+    except Exception as e:
+        return None, f"Browser-Start fehlgeschlagen: {str(e)[:80]}"
 
 
 def scrape_idealo_ean(ean: str) -> dict:
     """
-    Search idealo.de for an EAN and return the cheapest price and seller.
+    Search idealo.de for an EAN using a real Chromium browser (bypasses Cloudflare).
     Returns dict with keys: idealo_price, idealo_seller.
     """
     result = {"idealo_price": "", "idealo_seller": ""}
+
+    browser, err = _get_idealo_browser()
+    if err:
+        result["idealo_seller"] = err
+        return result
+
     try:
-        session = _get_idealo_session()
-        session.headers.update({"Referer": "https://www.idealo.de/"})
+        context = browser.new_context(
+            locale="de-DE",
+            timezone_id="Europe/Berlin",
+            viewport={"width": 1280, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
+        page = context.new_page()
 
-        search_url = f"https://www.idealo.de/preisvergleich/MainSearchProductCategory.html?q={ean}"
-        time.sleep(random.uniform(2.0, 4.0))
-        resp = session.get(search_url, timeout=20, allow_redirects=True)
+        search_url = (
+            f"https://www.idealo.de/preisvergleich/"
+            f"MainSearchProductCategory.html?q={ean}"
+        )
+        page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
 
-        if resp.status_code == 503:
-            # Session probably expired — reset and give up for this EAN
-            global _idealo_session
-            _idealo_session = None
-            result["idealo_seller"] = "Bot-Block (503) — bei Wiederholung neu versuchen"
-            return result
-
-        if resp.status_code != 200:
-            result["idealo_seller"] = f"HTTP {resp.status_code}"
-            return result
-
-        # Update Referer to the actual product page for any follow-up requests
-        session.headers.update({"Referer": resp.url})
-        soup = BeautifulSoup(resp.content, "html.parser")
-
-        # ── 1. JSON-LD structured data (most reliable) ────────────────────────
-        for script in soup.find_all("script", type="application/ld+json"):
+        # Accept cookie/consent banner if present
+        for btn in [
+            "#onetrust-accept-btn-handler",
+            "button[data-test='mf-accept-all-btn']",
+            "button.consent-accept",
+        ]:
             try:
-                data = json.loads(script.string or "")
-                if not isinstance(data, dict):
-                    continue
-                offers = data.get("offers")
-                if not offers:
-                    continue
-                if isinstance(offers, dict):
-                    offers = [offers]
-                if isinstance(offers, list) and offers:
-                    # Pick lowest price
-                    valid = [o for o in offers if o.get("price")]
-                    if valid:
-                        cheapest = min(valid, key=lambda o: float(str(o["price"]).replace(",", ".")))
-                        price_val = cheapest.get("price", "")
-                        currency = cheapest.get("priceCurrency", "EUR")
-                        symbol = "€" if currency == "EUR" else currency
-                        result["idealo_price"] = f"{price_val} {symbol}".strip()
-                        seller = cheapest.get("seller", {})
-                        result["idealo_seller"] = seller.get("name", "") if isinstance(seller, dict) else str(seller)
-                        if result["idealo_price"]:
-                            return result
+                page.locator(btn).click(timeout=2000)
+                page.wait_for_timeout(500)
+                break
             except Exception:
                 pass
 
-        # ── 2. HTML fallback — offer list ─────────────────────────────────────
-        # Idealo renders the cheapest offer server-side in .offerList or similar
-        price_selectors = [
-            ".price__text",
-            "[data-test='price']",
-            ".offerList-item-price-main .price",
-            ".sr-detailedResultList__item .price",
-            ".price",
-        ]
-        seller_selectors = [
-            ".shop__name",
-            "[data-test='shop-name']",
-            ".offerList-item-shopName",
-            ".sr-detailedResultList__item .shopName",
-        ]
+        # Wait for JS-rendered offer list
+        page.wait_for_timeout(2500)
 
-        for sel in price_selectors:
-            el = soup.select_one(sel)
-            if el:
-                val = el.get_text(strip=True)
-                if val:
-                    result["idealo_price"] = val
-                    break
+        # ── 1. JSON-LD (fastest, most reliable) ──────────────────────────────
+        ld_raw = page.evaluate("""() => {
+            for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+                try {
+                    const d = JSON.parse(s.textContent);
+                    if (d['@type'] === 'Product' && d.offers)
+                        return JSON.stringify(d.offers);
+                } catch(e) {}
+            }
+            return null;
+        }""")
 
-        for sel in seller_selectors:
-            el = soup.select_one(sel)
-            if el:
-                val = el.get_text(strip=True)
-                if val:
-                    result["idealo_seller"] = val
-                    break
+        if ld_raw:
+            offers_data = json.loads(ld_raw)
+            if isinstance(offers_data, dict):
+                offers_data = [offers_data]
+            if isinstance(offers_data, list):
+                valid = [o for o in offers_data if o.get("price")]
+                if valid:
+                    cheapest = min(valid, key=lambda o: float(str(o["price"]).replace(",", ".")))
+                    currency = cheapest.get("priceCurrency", "EUR")
+                    symbol = "€" if currency == "EUR" else currency
+                    result["idealo_price"] = f"{cheapest['price']} {symbol}".strip()
+                    seller = cheapest.get("seller", {})
+                    result["idealo_seller"] = seller.get("name", "") if isinstance(seller, dict) else ""
+                    context.close()
+                    return result
 
-        # ── 3. No-result detection ────────────────────────────────────────────
+        # ── 2. DOM selectors fallback ─────────────────────────────────────────
+        for sel, key in [
+            (".price__text",                     "idealo_price"),
+            ("[data-test='offer-price']",         "idealo_price"),
+            (".sc-price",                         "idealo_price"),
+            (".shop__name",                       "idealo_seller"),
+            ("[data-test='shop-name']",           "idealo_seller"),
+            (".sc-shop-name",                     "idealo_seller"),
+        ]:
+            try:
+                loc = page.locator(sel).first
+                loc.wait_for(timeout=1500)
+                val = loc.text_content() or ""
+                if val.strip():
+                    result[key] = val.strip()
+            except Exception:
+                pass
+
+        # ── 3. No-result fallback ─────────────────────────────────────────────
         if not result["idealo_price"] and not result["idealo_seller"]:
-            page_text = soup.get_text(" ", strip=True).lower()
-            if any(p in page_text for p in ["keine ergebnisse", "no results", "leider nichts gefunden"]):
+            body = (page.content() or "").lower()
+            if any(p in body for p in ["keine ergebnisse", "no results", "nichts gefunden"]):
                 result["idealo_seller"] = "Nicht auf Idealo gelistet"
             else:
                 result["idealo_seller"] = "Preis nicht auslesbar"
 
-    except requests.RequestException as e:
-        result["idealo_seller"] = f"Verbindungsfehler: {str(e)[:60]}"
+        context.close()
+
     except Exception as e:
-        result["idealo_seller"] = f"Fehler: {str(e)[:60]}"
+        result["idealo_seller"] = f"Fehler: {str(e)[:80]}"
 
     return result
