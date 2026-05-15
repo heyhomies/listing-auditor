@@ -215,6 +215,11 @@ def scrape_asin_once(asin: str, base_url: str) -> dict:
         time.sleep(random.uniform(2.0, 4.0))
         resp = session.get(url, timeout=20)
 
+        if resp.status_code == 503 or resp.status_code == 500:
+            _reset_session(base_url)
+            result["error"] = f"HTTP {resp.status_code} (Bot-Block) — Session zurückgesetzt"
+            return result
+
         if resp.status_code != 200:
             result["error"] = f"HTTP {resp.status_code}"
             return result
@@ -394,5 +399,17 @@ def scrape_asin_once(asin: str, base_url: str) -> dict:
 
 
 def scrape_asin(asin: str, base_url: str) -> dict:
-    """Single-attempt scrape. Use scrape_asin_once directly for UI-controlled retry."""
-    return scrape_asin_once(asin, base_url)
+    """Scrape with up to 3 retries on bot-block responses."""
+    for attempt in range(3):
+        result = scrape_asin_once(asin, base_url)
+        if result["success"]:
+            return result
+        err = result.get("error", "")
+        # Retry only on bot-block signals, not on genuine errors
+        if "Bot" in err or "500" in err or "503" in err or "zurückgesetzt" in err:
+            wait = (attempt + 1) * random.uniform(8.0, 15.0)
+            logger.warning(f"Bot-Block für {asin} (Versuch {attempt+1}), warte {wait:.0f}s …")
+            time.sleep(wait)
+        else:
+            return result
+    return result
