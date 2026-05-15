@@ -157,25 +157,30 @@ def _resolve_ean_to_product_url(ean: str, base_url: str, session) -> tuple:
     if any(phrase in page_text for phrase in no_results_phrases):
         return None, "Kein Produkt für diese EAN verfügbar"
 
+    first_asin = None
     for item in soup.select("[data-component-type='s-search-result']"):
         asin_val = item.get("data-asin", "").strip()
         if not asin_val:
             continue
+        if first_asin is None:
+            first_asin = asin_val
 
+        # Only use specific, reliable sponsored indicators (no broad text scan)
         is_sponsored = bool(
             item.select_one(".puis-sponsored-label-text")
             or item.select_one("[aria-label*='Gesponsert']")
             or item.select_one("[aria-label*='Sponsored']")
-            or any(
-                "gesponsert" in el.get_text().lower() or "sponsored" in el.get_text().lower()
-                for el in item.select("span.a-color-secondary, span.a-size-mini, .a-row.a-size-mini")
-            )
         )
 
         if not is_sponsored:
             return f"{domain}/dp/{asin_val}", ""
 
-    return None, "Kein nicht-gesponsertes Produkt in den Suchergebnissen gefunden"
+    # Fallback: if every result was sponsored, use the first one anyway.
+    # For EAN searches the top result is virtually always the correct product.
+    if first_asin:
+        return f"{domain}/dp/{first_asin}", ""
+
+    return None, "Keine Suchergebnisse für diese EAN gefunden"
 
 
 def scrape_asin_once(asin: str, base_url: str) -> dict:
