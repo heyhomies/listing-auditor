@@ -8,6 +8,7 @@ import time
 import random
 import threading
 import re
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -412,4 +413,110 @@ def scrape_asin(asin: str, base_url: str) -> dict:
             time.sleep(wait)
         else:
             return result
+    return result
+
+
+# ── Idealo Scraper ────────────────────────────────────────────────────────────
+
+_IDEALO_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
+
+
+def scrape_idealo_ean(ean: str) -> dict:
+    """
+    Search idealo.de for an EAN and return the cheapest price and seller.
+    Returns dict with keys: idealo_price, idealo_seller.
+    """
+    result = {"idealo_price": "", "idealo_seller": ""}
+    try:
+        session = requests.Session()
+        session.headers.update(_IDEALO_HEADERS)
+
+        search_url = f"https://www.idealo.de/preisvergleich/MainSearchProductCategory.html?q={ean}"
+        time.sleep(random.uniform(1.5, 3.0))
+        resp = session.get(search_url, timeout=15, allow_redirects=True)
+
+        if resp.status_code != 200:
+            result["idealo_seller"] = f"HTTP {resp.status_code}"
+            return result
+
+        soup = BeautifulSoup(resp.content, "html.parser")
+
+        # ── 1. JSON-LD structured data (most reliable) ────────────────────────
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+                if not isinstance(data, dict):
+                    continue
+                offers = data.get("offers")
+                if not offers:
+                    continue
+                if isinstance(offers, dict):
+                    offers = [offers]
+                if isinstance(offers, list) and offers:
+                    # Pick lowest price
+                    valid = [o for o in offers if o.get("price")]
+                    if valid:
+                        cheapest = min(valid, key=lambda o: float(str(o["price"]).replace(",", ".")))
+                        price_val = cheapest.get("price", "")
+                        currency = cheapest.get("priceCurrency", "EUR")
+                        symbol = "€" if currency == "EUR" else currency
+                        result["idealo_price"] = f"{price_val} {symbol}".strip()
+                        seller = cheapest.get("seller", {})
+                        result["idealo_seller"] = seller.get("name", "") if isinstance(seller, dict) else str(seller)
+                        if result["idealo_price"]:
+                            return result
+            except Exception:
+                pass
+
+        # ── 2. HTML fallback — offer list ─────────────────────────────────────
+        # Idealo renders the cheapest offer server-side in .offerList or similar
+        price_selectors = [
+            ".price__text",
+            "[data-test='price']",
+            ".offerList-item-price-main .price",
+            ".sr-detailedResultList__item .price",
+            ".price",
+        ]
+        seller_selectors = [
+            ".shop__name",
+            "[data-test='shop-name']",
+            ".offerList-item-shopName",
+            ".sr-detailedResultList__item .shopName",
+        ]
+
+        for sel in price_selectors:
+            el = soup.select_one(sel)
+            if el:
+                val = el.get_text(strip=True)
+                if val:
+                    result["idealo_price"] = val
+                    break
+
+        for sel in seller_selectors:
+            el = soup.select_one(sel)
+            if el:
+                val = el.get_text(strip=True)
+                if val:
+                    result["idealo_seller"] = val
+                    break
+
+        # ── 3. No-result detection ────────────────────────────────────────────
+        if not result["idealo_price"] and not result["idealo_seller"]:
+            page_text = soup.get_text(" ", strip=True).lower()
+            if any(p in page_text for p in ["keine ergebnisse", "no results", "leider nichts gefunden"]):
+                result["idealo_seller"] = "Nicht auf Idealo gelistet"
+            else:
+                result["idealo_seller"] = "Preis nicht auslesbar"
+
+    except requests.RequestException as e:
+        result["idealo_seller"] = f"Verbindungsfehler: {str(e)[:60]}"
+    except Exception as e:
+        result["idealo_seller"] = f"Fehler: {str(e)[:60]}"
+
     return result

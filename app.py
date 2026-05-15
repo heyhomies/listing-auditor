@@ -12,7 +12,7 @@ import traceback
 import base64
 import threading
 
-from amazon_scraper import MARKETPLACES, scrape_asin
+from amazon_scraper import MARKETPLACES, scrape_asin, scrape_idealo_ean
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -187,6 +187,11 @@ def process_asin(asin: str, base_url: str, client, model: str, fields: dict) -> 
         )
         result["Empfehlungen"] = evaluation.empfehlung
 
+    if fields.get("idealo") and is_ean:
+        idealo = scrape_idealo_ean(asin)
+        result["Idealo Preis"] = idealo["idealo_price"]
+        result["Idealo Verkäufer"] = idealo["idealo_seller"]
+
     return result
 
 
@@ -255,6 +260,8 @@ def main():
         field_offer   = st.checkbox("Angebot (Preis, Verkäufer)", value=True)
         field_media   = st.checkbox("Präsentation (Galeriebilder, A+)", value=True)
         field_cosmo   = st.checkbox("COSMO-Analyse (Score + Empfehlungen)", value=True)
+        field_idealo  = st.checkbox("Idealo Preisvergleich (nur EAN)", value=False,
+                                    help="Sucht den günstigsten Anbieter auf idealo.de — nur verfügbar wenn EAN-Codes hochgeladen werden.")
 
         fields = {
             "title":   field_title,
@@ -264,6 +271,7 @@ def main():
             "offer":   field_offer,
             "media":   field_media,
             "cosmo":   field_cosmo,
+            "idealo":  field_idealo,
         }
 
     # ── File Upload ───────────────────────────────────────────────────────────
@@ -421,6 +429,8 @@ def main():
         optional_cols += ["Galeriebilder", "A+ Content"]
     if fields.get("cosmo"):
         optional_cols += ["COSMO Score", "Empfehlungen"]
+    if fields.get("idealo"):
+        optional_cols += ["Idealo Preis", "Idealo Verkäufer"]
 
     export_cols = first_cols + optional_cols
     all_keys = set().union(*(r.keys() for r in success_results))
