@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pydantic import BaseModel, Field
 from typing import List
 import logging
+import traceback
 import base64
 import threading
 
@@ -374,17 +375,23 @@ def main():
         else:
             st.error(f"❌ {r['asin']}: {r.get('error', 'Unbekannter Fehler')}")
 
-    with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-        futures = {
-            executor.submit(process_asin, ident, base_url, client, active_model, fields): ident
-            for ident in identifiers
-        }
-        for future in as_completed(futures):
-            ident = futures[future]
-            try:
-                on_result(future.result())
-            except Exception as e:
-                on_result({"asin": ident, "success": False, "error": str(e)})
+    try:
+        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+            futures = {
+                executor.submit(process_asin, ident, base_url, client, active_model, fields): ident
+                for ident in identifiers
+            }
+            for future in as_completed(futures):
+                ident = futures[future]
+                try:
+                    on_result(future.result())
+                except Exception as e:
+                    logger.error(f"on_result error for {ident}: {traceback.format_exc()}")
+                    on_result({"asin": ident, "success": False, "error": str(e)})
+    except Exception as e:
+        logger.error(f"Executor error: {traceback.format_exc()}")
+        st.error(f"Fehler bei der Analyse: {e}")
+        return
 
     success_count = sum(1 for r in all_results if r["success"])
     fail_count = len(all_results) - success_count
@@ -418,16 +425,28 @@ def main():
     export_cols = first_cols + optional_cols
     all_keys = set().union(*(r.keys() for r in success_results))
     export_cols = [c for c in export_cols if c in all_keys]
+    logger.info(f"Export-Spalten: {export_cols}")
 
-    df_out = pd.DataFrame(success_results)[export_cols]
+    try:
+        export_data = [{k: v for k, v in r.items() if k in export_cols} for r in success_results]
+        df_out = pd.DataFrame(export_data, columns=export_cols)
+    except Exception as e:
+        logger.error(f"DataFrame-Fehler: {traceback.format_exc()}")
+        st.error(f"Fehler beim Erstellen der Tabelle: {e}")
+        return
 
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_out.to_excel(writer, index=False, sheet_name="ASIN Audit")
-        ws = writer.sheets["ASIN Audit"]
-        for col_cells in ws.columns:
-            length = max((len(str(cell.value or "")) for cell in col_cells), default=10)
-            ws.column_dimensions[col_cells[0].column_letter].width = min(length + 2, 60)
+    try:
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df_out.to_excel(writer, index=False, sheet_name="ASIN Audit")
+            ws = writer.sheets["ASIN Audit"]
+            for col_cells in ws.columns:
+                length = max((len(str(cell.value or "")) for cell in col_cells), default=10)
+                ws.column_dimensions[col_cells[0].column_letter].width = min(length + 2, 60)
+    except Exception as e:
+        logger.error(f"Excel-Fehler: {traceback.format_exc()}")
+        st.error(f"Fehler beim Erstellen der Excel-Datei: {e}")
+        return
 
     import datetime
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
