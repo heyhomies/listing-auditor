@@ -418,13 +418,40 @@ def scrape_asin(asin: str, base_url: str) -> dict:
 
 # ── Idealo Scraper ────────────────────────────────────────────────────────────
 
-_IDEALO_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-}
+_idealo_session = None
+
+
+def _get_idealo_session() -> requests.Session:
+    """Return a warmed-up Idealo session (singleton, created once per process)."""
+    global _idealo_session
+    if _idealo_session is not None:
+        return _idealo_session
+
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+        "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+    })
+    # Warm up: visit homepage to get cookies (consent etc.)
+    try:
+        session.get("https://www.idealo.de", timeout=15)
+        time.sleep(random.uniform(1.0, 2.0))
+    except Exception:
+        pass
+    _idealo_session = session
+    return session
 
 
 def scrape_idealo_ean(ean: str) -> dict:
@@ -434,17 +461,26 @@ def scrape_idealo_ean(ean: str) -> dict:
     """
     result = {"idealo_price": "", "idealo_seller": ""}
     try:
-        session = requests.Session()
-        session.headers.update(_IDEALO_HEADERS)
+        session = _get_idealo_session()
+        session.headers.update({"Referer": "https://www.idealo.de/"})
 
         search_url = f"https://www.idealo.de/preisvergleich/MainSearchProductCategory.html?q={ean}"
-        time.sleep(random.uniform(1.5, 3.0))
-        resp = session.get(search_url, timeout=15, allow_redirects=True)
+        time.sleep(random.uniform(2.0, 4.0))
+        resp = session.get(search_url, timeout=20, allow_redirects=True)
+
+        if resp.status_code == 503:
+            # Session probably expired — reset and give up for this EAN
+            global _idealo_session
+            _idealo_session = None
+            result["idealo_seller"] = "Bot-Block (503) — bei Wiederholung neu versuchen"
+            return result
 
         if resp.status_code != 200:
             result["idealo_seller"] = f"HTTP {resp.status_code}"
             return result
 
+        # Update Referer to the actual product page for any follow-up requests
+        session.headers.update({"Referer": resp.url})
         soup = BeautifulSoup(resp.content, "html.parser")
 
         # ── 1. JSON-LD structured data (most reliable) ────────────────────────
