@@ -227,7 +227,10 @@ def main():
     with st.sidebar:
         st.subheader("⚙️ Konfiguration")
 
-        default_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
+        try:
+            default_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        except Exception:
+            default_key = ""
         api_key = st.text_input("Anthropic API Key", value=default_key, type="password")
 
         model_options = {
