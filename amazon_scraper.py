@@ -10,6 +10,7 @@ import threading
 import re
 import json
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -417,22 +418,32 @@ def scrape_asin(asin: str, base_url: str) -> dict:
 # Requires: pip install playwright && playwright install chromium
 
 _pw_instance = None
-_idealo_browser = None
+_idealo_context = None  # persistent browser context reused across EANs
 
 
-def _get_idealo_browser():
-    """Return a persistent Chromium browser instance (created once per process)."""
-    global _pw_instance, _idealo_browser
-    if _idealo_browser is not None:
+def _get_idealo_context():
+    """
+    Return a persistent Chrome browser context for Idealo.
+    Uses a local profile directory so cookies/session survive between app restarts.
+    Runs non-headless (visible window) — the only reliable way past Idealo's bot detection.
+    """
+    global _pw_instance, _idealo_context
+    if _idealo_context is not None:
         try:
-            if _idealo_browser.is_connected():
-                return _idealo_browser, None
+            # quick liveness check
+            _ = _idealo_context.pages
+            return _idealo_context, None
         except Exception:
-            pass
+            _idealo_context = None
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        return None, "playwright nicht installiert — bitte ausführen: pip install playwright && playwright install chromium"
+        return None, (
+            "playwright nicht installiert — bitte ausführen:\n"
+            "  pip install playwright && playwright install chrome"
+        )
+
     try:
         if _pw_instance is not None:
             try:
@@ -440,62 +451,59 @@ def _get_idealo_browser():
             except Exception:
                 pass
         _pw_instance = sync_playwright().start()
-        _idealo_browser = _pw_instance.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+
+        # Persistent profile directory — Idealo remembers this "browser"
+        profile_dir = str(Path(__file__).parent / ".idealo_profile")
+
+        _idealo_context = _pw_instance.chromium.launch_persistent_context(
+            profile_dir,
+            channel="chrome",          # use real Chrome, not bundled Chromium
+            headless=False,            # must be visible — headless is detected & blocked
+            locale="de-DE",
+            timezone_id="Europe/Berlin",
+            viewport={"width": 1280, "height": 900},
+            args=["--no-sandbox"],
         )
-        return _idealo_browser, None
+        return _idealo_context, None
     except Exception as e:
-        return None, f"Browser-Start fehlgeschlagen: {str(e)[:80]}"
+        return None, f"Browser-Start fehlgeschlagen: {str(e)[:120]}"
 
 
 def scrape_idealo_ean(ean: str) -> dict:
     """
-    Search idealo.de for an EAN using a real Chromium browser (bypasses Cloudflare).
+    Search idealo.de for an EAN using a persistent real Chrome session.
     Returns dict with keys: idealo_price, idealo_seller.
     """
     result = {"idealo_price": "", "idealo_seller": ""}
 
-    browser, err = _get_idealo_browser()
+    context, err = _get_idealo_context()
     if err:
         result["idealo_seller"] = err
         return result
 
+    page = None
     try:
-        context = browser.new_context(
-            locale="de-DE",
-            timezone_id="Europe/Berlin",
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-        )
         page = context.new_page()
-
         search_url = (
             f"https://www.idealo.de/preisvergleich/"
             f"MainSearchProductCategory.html?q={ean}"
         )
-        page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+        page.goto(search_url, wait_until="load", timeout=30000)
 
-        # Accept cookie/consent banner if present
-        for btn in [
-            "#onetrust-accept-btn-handler",
-            "button[data-test='mf-accept-all-btn']",
-            "button.consent-accept",
-        ]:
+        # Accept cookie banner (only needed on first run)
+        for btn in ["#onetrust-accept-btn-handler", "button[data-test='mf-accept-all-btn']"]:
             try:
-                page.locator(btn).click(timeout=2000)
-                page.wait_for_timeout(500)
-                break
+                if page.locator(btn).count() > 0:
+                    page.locator(btn).click(timeout=2000)
+                    page.wait_for_timeout(600)
+                    break
             except Exception:
                 pass
 
-        # Wait for JS-rendered offer list
-        page.wait_for_timeout(2500)
+        # Wait for JS offer list to render (longer = less likely to trigger rate limit)
+        page.wait_for_timeout(random.randint(5000, 8000))
 
-        # ── 1. JSON-LD (fastest, most reliable) ──────────────────────────────
+        # ── 1. JSON-LD structured data ────────────────────────────────────────
         ld_raw = page.evaluate("""() => {
             for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
                 try {
@@ -520,38 +528,42 @@ def scrape_idealo_ean(ean: str) -> dict:
                     result["idealo_price"] = f"{cheapest['price']} {symbol}".strip()
                     seller = cheapest.get("seller", {})
                     result["idealo_seller"] = seller.get("name", "") if isinstance(seller, dict) else ""
-                    context.close()
+                    page.close()
                     return result
 
-        # ── 2. DOM selectors fallback ─────────────────────────────────────────
-        for sel, key in [
-            (".price__text",                     "idealo_price"),
-            ("[data-test='offer-price']",         "idealo_price"),
-            (".sc-price",                         "idealo_price"),
-            (".shop__name",                       "idealo_seller"),
-            ("[data-test='shop-name']",           "idealo_seller"),
-            (".sc-shop-name",                     "idealo_seller"),
-        ]:
-            try:
-                loc = page.locator(sel).first
-                loc.wait_for(timeout=1500)
-                val = loc.text_content() or ""
-                if val.strip():
-                    result[key] = val.strip()
-            except Exception:
-                pass
+        # ── 2. Page-text extraction (works when page renders) ─────────────────
+        # Parse price and shop from rendered page text
+        body_text = page.inner_text("body") if page else ""
+        if "Something has gone wrong" in body_text or not body_text.strip():
+            result["idealo_seller"] = "Bot-Block — bitte erneut versuchen"
+            page.close()
+            return result
 
-        # ── 3. No-result fallback ─────────────────────────────────────────────
+        # Look for price pattern like "14,99 €" in offer section
+        price_match = re.search(r"(\d{1,4}[.,]\d{2})\s*€", body_text)
+        if price_match:
+            result["idealo_price"] = price_match.group(0).strip()
+
+        # Look for shop name after "Shop:" or "Verkauf durch:"
+        shop_match = re.search(
+            r"(?:Shop:|Verkauf durch:|Marketplace:)\s*\n?\s*([^\n]+)", body_text
+        )
+        if shop_match:
+            result["idealo_seller"] = shop_match.group(1).strip()
+
         if not result["idealo_price"] and not result["idealo_seller"]:
-            body = (page.content() or "").lower()
-            if any(p in body for p in ["keine ergebnisse", "no results", "nichts gefunden"]):
+            if any(p in body_text.lower() for p in ["keine ergebnisse", "no results"]):
                 result["idealo_seller"] = "Nicht auf Idealo gelistet"
             else:
                 result["idealo_seller"] = "Preis nicht auslesbar"
 
-        context.close()
-
     except Exception as e:
         result["idealo_seller"] = f"Fehler: {str(e)[:80]}"
+    finally:
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
 
     return result
