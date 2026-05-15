@@ -260,8 +260,7 @@ def main():
         field_offer   = st.checkbox("Angebot (Preis, Verkäufer)", value=True)
         field_media   = st.checkbox("Präsentation (Galeriebilder, A+)", value=True)
         field_cosmo   = st.checkbox("COSMO-Analyse (Score + Empfehlungen)", value=True)
-        field_idealo  = st.checkbox("Idealo Preisvergleich (nur EAN)", value=False,
-                                    help="Sucht den günstigsten Anbieter auf idealo.de — nur verfügbar wenn EAN-Codes hochgeladen werden.")
+        field_idealo  = False  # Deaktiviert: Idealo nutzt Cloudflare, nicht zuverlässig per requests scrapbar
 
         fields = {
             "title":   field_title,
