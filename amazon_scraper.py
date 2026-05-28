@@ -158,12 +158,14 @@ def _resolve_ean_to_product_url(ean: str, base_url: str, session) -> tuple:
     if any(phrase in page_text for phrase in no_results_phrases):
         return None, "Kein Produkt für diese EAN verfügbar"
 
+    first_asin = None
     for item in soup.select("[data-component-type='s-search-result']"):
         asin_val = item.get("data-asin", "").strip()
         if not asin_val:
             continue
+        if first_asin is None:
+            first_asin = asin_val
 
-        # Only use specific, reliable sponsored indicators (no broad text scan)
         is_sponsored = bool(
             item.select_one(".puis-sponsored-label-text")
             or item.select_one("[aria-label*='Gesponsert']")
@@ -172,6 +174,11 @@ def _resolve_ean_to_product_url(ean: str, base_url: str, session) -> tuple:
 
         if not is_sponsored:
             return f"{domain}/dp/{asin_val}", ""
+
+    # For EAN searches, the first result is virtually always the correct product
+    # (brands advertise their own EANs), so fall back to it rather than failing.
+    if first_asin:
+        return f"{domain}/dp/{first_asin}", ""
 
     return None, "EAN nicht auf Amazon gelistet"
 
@@ -264,10 +271,14 @@ def scrape_asin_once(asin: str, base_url: str) -> dict:
 
         # ── Price extraction ──────────────────────────────────────────────────
         if not is_unavailable:
+            # 1. Primary buybox CSS selectors
             buybox_price_selectors = [
                 "#corePrice_feature_div .a-offscreen",
+                "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
                 "#desktop_buybox .a-price .a-offscreen",
                 "#buybox .a-price .a-offscreen",
+                "#buyBoxAccordion .a-price .a-offscreen",
+                "#newAccordionRow .a-price .a-offscreen",
                 "#priceblock_ourprice",
                 "#priceblock_dealprice",
                 "#apex_price_block .a-price .a-offscreen",
@@ -280,14 +291,61 @@ def scrape_asin_once(asin: str, base_url: str) -> dict:
                     if val:
                         result["price"] = val
                         break
+
+            # 2. Tabular buybox plain-text price (label/value cell pairs)
             if not result["price"]:
-                excluded = ("lpo_feature_div", "sims-", "sp_detail", "discovery", "inspiration")
-                for price_el in soup.select(".a-price .a-offscreen"):
-                    parent_ids = " ".join(a.get("id", "") for a in price_el.parents)
-                    if not any(ex in parent_ids for ex in excluded):
-                        val = price_el.get_text(strip=True)
-                        if val and ("€" in val or "$" in val or "£" in val or any(c.isdigit() for c in val)):
+                price_label_fragments = ("preis", "price")
+                all_cells = soup.select(".tabular-buybox-text")
+                for i, cell in enumerate(all_cells):
+                    cell_text = cell.get_text(strip=True).lower()
+                    if any(frag in cell_text for frag in price_label_fragments) and i + 1 < len(all_cells):
+                        val = all_cells[i + 1].get_text(strip=True)
+                        if val and any(c.isdigit() for c in val):
                             result["price"] = val
+                            break
+
+            # 3. JSON-LD structured data
+            if not result["price"]:
+                for script in soup.select('script[type="application/ld+json"]'):
+                    try:
+                        data = json.loads(script.string or "")
+                        if isinstance(data, dict) and data.get("@type") == "Product":
+                            offers = data.get("offers", {})
+                            if isinstance(offers, dict) and offers.get("price"):
+                                currency = offers.get("priceCurrency", "EUR")
+                                symbol = "€" if currency == "EUR" else currency
+                                result["price"] = f"{offers['price']} {symbol}".strip()
+                                break
+                            elif isinstance(offers, list):
+                                valid = [o for o in offers if o.get("price")]
+                                if valid:
+                                    cheapest = min(valid, key=lambda o: float(str(o["price"]).replace(",", ".")))
+                                    currency = cheapest.get("priceCurrency", "EUR")
+                                    symbol = "€" if currency == "EUR" else currency
+                                    result["price"] = f"{cheapest['price']} {symbol}".strip()
+                                    break
+                    except Exception:
+                        pass
+
+            # 4. Fallback: scan all .a-price .a-offscreen, prefer buybox containers
+            if not result["price"]:
+                excluded = (
+                    "lpo_feature_div", "sims-", "sp_detail", "discovery", "inspiration",
+                    "aod-", "all-offers", "olp_feature", "buyNew_feature",
+                )
+                buybox_ancestors = (
+                    "buybox", "corePrice", "desktop_buybox", "apex_desktop",
+                    "newAccordionRow", "tabular-buybox",
+                )
+                for price_el in soup.select(".a-price .a-offscreen"):
+                    parent_ids = " ".join(a.get("id", "") + " " + " ".join(a.get("class", [])) for a in price_el.parents)
+                    if any(ex in parent_ids for ex in excluded):
+                        continue
+                    in_buybox = any(anc in parent_ids for anc in buybox_ancestors)
+                    val = price_el.get_text(strip=True)
+                    if val and ("€" in val or "$" in val or "£" in val or any(c.isdigit() for c in val)):
+                        result["price"] = val
+                        if in_buybox:
                             break
 
             # For suppressed buybox: fetch mobile page to get unqualified offer price
@@ -341,16 +399,40 @@ def scrape_asin_once(asin: str, base_url: str) -> dict:
             if seller_el:
                 return seller_el.get_text(strip=True)
 
+            # JSON-LD structured data
+            for script in soup.select('script[type="application/ld+json"]'):
+                try:
+                    data = json.loads(script.string or "")
+                    if isinstance(data, dict) and data.get("@type") == "Product":
+                        offers = data.get("offers", {})
+                        if isinstance(offers, dict):
+                            seller = offers.get("seller", {})
+                            name = seller.get("name", "") if isinstance(seller, dict) else ""
+                            if name:
+                                return name
+                        elif isinstance(offers, list):
+                            valid = [o for o in offers if o.get("price")]
+                            if valid:
+                                cheapest = min(valid, key=lambda o: float(str(o["price"]).replace(",", ".")))
+                                seller = cheapest.get("seller", {})
+                                name = seller.get("name", "") if isinstance(seller, dict) else ""
+                                if name:
+                                    return name
+                except Exception:
+                    pass
+
             return ""
 
         # ── Seller / availability override ────────────────────────────────────
         if is_unavailable:
             result["price"] = ""
             result["verkaeufer"] = "Derzeit nicht verfügbar"
-        elif is_suppressed:
-            result["verkaeufer"] = "nicht hervorgehoben"
         else:
-            result["verkaeufer"] = _extract_seller(soup)
+            extracted = _extract_seller(soup)
+            if extracted:
+                result["verkaeufer"] = extracted
+            elif is_suppressed:
+                result["verkaeufer"] = "nicht hervorgehoben"
 
         review_count_el = soup.select_one("#acrCustomerReviewText")
         if review_count_el:

@@ -17,6 +17,15 @@ from amazon_scraper import MARKETPLACES, scrape_asin, scrape_idealo_ean
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def get_byte_length(text: str) -> int:
+    return len(text.encode("utf-8")) if text else 0
+
+
+# Optimal byte ranges (aligned with listing_agent)
+TITLE_MIN, TITLE_MAX = 170, 200
+BULLET_MIN, BULLET_MAX = 170, 200
+
 # ── Pydantic Models ───────────────────────────────────────────────────────────
 
 class CosmoEvaluation(BaseModel):
@@ -25,7 +34,8 @@ class CosmoEvaluation(BaseModel):
     score_eigenschaften: int = Field(default=0, description="0-2: Material, Komponenten, Qualität, Zertifikate genannt?")
     score_verwendungskontext: int = Field(default=0, description="0-2: Verwendungszweck, Umgebung, Aktivitäten beschrieben?")
     score_zielgruppe_anlass: int = Field(default=0, description="0-2: Zielgruppe, Anlass, Stil, Themen vorhanden?")
-    score_format: int = Field(default=0, description="0-2: Titel-Struktur sinnvoll? Bullets mit Hook-Format?")
+    score_format: int = Field(default=0, description="0-2: Titel-Struktur sinnvoll? Bullets mit Hook-Format? Byte-Längen im Zielbereich?")
+    score_policy: int = Field(default=0, description="0-2: Amazon Policy konform? Keine subjektiven Claims ohne Beleg, keine Firmenhistorie, keine rhetorischen Fragen?")
     empfehlung: str = Field(default="", description="Zusammenfassende Handlungsempfehlung in 2-4 Sätzen: wichtigste Verbesserungen für Titel, Bullets, Backend und Gesamtstrategie.")
 
 
@@ -42,12 +52,18 @@ BULLET 3: {{bullet3}}
 BULLET 4: {{bullet4}}
 BULLET 5: {{bullet5}}
 
-🎯 BEWERTUNGSSYSTEM — COSMO 15 Beziehungstypen (5 Dimensionen, je 0-2 Punkte):
+📏 BYTE-ANALYSE (Umlaute = 2 Bytes):
+Titel: {{title_bytes}} Bytes (Optimum: 170–200)
+Bullet 1: {{b1_bytes}} Bytes | Bullet 2: {{b2_bytes}} Bytes | Bullet 3: {{b3_bytes}} Bytes
+Bullet 4: {{b4_bytes}} Bytes | Bullet 5: {{b5_bytes}} Bytes
+(Optimum je Bullet: 170–200 Bytes)
+
+🎯 BEWERTUNGSSYSTEM — COSMO 15 Beziehungstypen (6 Dimensionen, je 0-2 Punkte, max. 12):
 
 Bewerte jede Dimension mit:
-- 0 = Fehlt komplett
-- 1 = Teilweise vorhanden
-- 2 = Gut bis sehr gut abgedeckt
+- 0 = Fehlt komplett / schwerer Verstoß
+- 1 = Teilweise vorhanden / leichte Mängel
+- 2 = Gut bis sehr gut
 
 **DIMENSION 1 – Produktidentität [0-2]**
 Bezieht sich auf: is, has_brand
@@ -65,9 +81,24 @@ Bezieht sich auf: used_for, used_in, used_with, enables_activity
 Bezieht sich auf: used_by, targets_audience, occasion, has_style, associated_with
 → Zielgruppe (z.B. Familien, Profis), Anlass (z.B. Alltag, Weihnachten), Stil, thematische Einordnung?
 
-**DIMENSION 5 – Format & Struktur [0-2]**
+**DIMENSION 5 – Format, Struktur & Länge [0-2]**
 → Titel: Sinnvolle Struktur (Marke + Produktart + Eigenschaften)? Kein reines Keyword-Stuffing?
-→ Bullets: Beginnen mit einem informativen Hook? Vollständige nutzenorientierte Sätze? Kein reines Aufzählen?
+   Titellänge im Optimum (170–200 Bytes)? − 1 Punkt wenn deutlich zu kurz (<120B) oder zu lang (>230B)
+→ Bullets: Beginnen mit informativen Hook in Großbuchstaben (HOOK: Satz)? Vollständige Sätze?
+   Bullet-Längen überwiegend im Optimum (170–200 Bytes)?
+- 2 = Struktur gut, Längen großteils im Zielbereich
+- 1 = Leichte Abweichungen (Länge oder Format)
+- 0 = Kein erkennbares Format und/oder Längen weit außerhalb
+
+**DIMENSION 6 – Amazon Policy-Konformität [0-2]**
+→ Prüfe Titel und Bullets auf Policy-Verstöße:
+   ❌ Subjektive Behauptungen ohne Beleg (z.B. "HOCHWERTIG." oder "PREMIUM QUALITÄT." allein — ohne Material, Norm, Zertifikat)
+   ❌ Firmengeschichte / Storytelling (z.B. "gegründet 1931", "seit X Jahren", "bekannt aus ...")
+   ❌ Rhetorische Fragen an den Käufer (z.B. "Liebst du gutes Essen?")
+   ❌ Lifestyle-Appelle / Call-to-Action statt Produktmerkmal (z.B. "Schmücke deinen Esstisch!", "Verwöhne deine Gäste!")
+- 2 = Keine Policy-Verstöße erkennbar
+- 1 = Leichte Grenzfälle (z.B. "hochwertig" mit schwacher Begründung)
+- 0 = Klare Verstöße vorhanden
 
 🔧 EMPFEHLUNG (empfehlung):
 Fasse die wichtigsten Verbesserungsmaßnahmen in 2-4 prägnanten Sätzen zusammen.
@@ -87,14 +118,21 @@ def _make_tool(name: str, description: str, model_class) -> dict:
 
 def evaluate_cosmo(client, model: str, asin: str, title: str, bullets: list) -> CosmoEvaluation:
     bullets_padded = (bullets + ["", "", "", "", ""])[:5]
+    b = [bp or "" for bp in bullets_padded]
     prompt = (COSMO_EVAL_PROMPT
               .replace("{{asin}}", asin)
               .replace("{{title}}", title or "— kein Titel gecrawlt —")
-              .replace("{{bullet1}}", bullets_padded[0] or "— nicht vorhanden —")
-              .replace("{{bullet2}}", bullets_padded[1] or "— nicht vorhanden —")
-              .replace("{{bullet3}}", bullets_padded[2] or "— nicht vorhanden —")
-              .replace("{{bullet4}}", bullets_padded[3] or "— nicht vorhanden —")
-              .replace("{{bullet5}}", bullets_padded[4] or "— nicht vorhanden —"))
+              .replace("{{bullet1}}", b[0] or "— nicht vorhanden —")
+              .replace("{{bullet2}}", b[1] or "— nicht vorhanden —")
+              .replace("{{bullet3}}", b[2] or "— nicht vorhanden —")
+              .replace("{{bullet4}}", b[3] or "— nicht vorhanden —")
+              .replace("{{bullet5}}", b[4] or "— nicht vorhanden —")
+              .replace("{{title_bytes}}", str(get_byte_length(title or "")))
+              .replace("{{b1_bytes}}", str(get_byte_length(b[0])))
+              .replace("{{b2_bytes}}", str(get_byte_length(b[1])))
+              .replace("{{b3_bytes}}", str(get_byte_length(b[2])))
+              .replace("{{b4_bytes}}", str(get_byte_length(b[3])))
+              .replace("{{b5_bytes}}", str(get_byte_length(b[4]))))
 
     tool = _make_tool("cosmo_evaluation", "COSMO-Bewertung des Amazon-Listings", CosmoEvaluation)
     resp = client.messages.create(
@@ -113,82 +151,86 @@ def evaluate_cosmo(client, model: str, asin: str, title: str, bullets: list) -> 
 
 # ── Processing ────────────────────────────────────────────────────────────────
 
-def process_asin(asin: str, base_url: str, client, model: str, fields: dict) -> dict:
-    asin = asin.strip().upper()
-    is_ean = asin.isdigit()
-    logger.info(f"Verarbeite {'EAN' if is_ean else 'ASIN'}: {asin}")
-
-    scraped = scrape_asin(asin, base_url)
-
-    if not scraped["success"]:
-        return {"asin": asin, "is_ean": is_ean, "success": False, "error": scraped["error"]}
-
-    resolved_asin = scraped.get("resolved_asin", "") or asin
-    bullets = (scraped["bullets"] + ["", "", "", "", ""])[:5]
+def process_item(asin: str, ean: str, base_url: str, client, model: str, fields: dict) -> dict:
+    """
+    asin: Amazon ASIN (10-stellig) oder leer → Amazon-Scraping
+    ean:  EAN/GTIN (Ziffernfolge)  oder leer → Idealo-Abfrage
+    """
+    display_id = asin or ean
+    logger.info(f"Verarbeite {'ASIN' if asin else 'EAN'}: {display_id}")
 
     result = {
-        "asin": asin,
-        "is_ean": is_ean,
+        "display_id": display_id,
         "success": True,
-        "title": scraped["title"],
-        "bullets": scraped["bullets"],
+        "title": "",
+        "bullets": [],
         "gesamt_score": None,
-        "ASIN": resolved_asin,
     }
-    if is_ean:
-        result["EAN"] = asin
+    if asin:
+        result["ASIN"] = asin
+    if ean:
+        result["EAN"] = ean
 
-    if fields.get("title"):
-        result["Live Titel"] = scraped["title"]
+    # ── Amazon-Scraping (nur wenn ASIN vorhanden) ─────────────────────────────
+    if asin:
+        scraped = scrape_asin(asin, base_url)
+        if not scraped["success"]:
+            return {"display_id": display_id, "ASIN": asin, "EAN": ean,
+                    "success": False, "error": scraped["error"]}
 
-    if fields.get("bullets"):
-        result["Live Bullet 1"] = bullets[0]
-        result["Live Bullet 2"] = bullets[1]
-        result["Live Bullet 3"] = bullets[2]
-        result["Live Bullet 4"] = bullets[3]
-        result["Live Bullet 5"] = bullets[4]
+        resolved_asin = scraped.get("resolved_asin", "") or asin
+        bullets = (scraped["bullets"] + ["", "", "", "", ""])[:5]
+        result["ASIN"] = resolved_asin
+        result["title"] = scraped["title"]
+        result["bullets"] = scraped["bullets"]
 
-    if fields.get("desc"):
-        result["Beschreibung"] = scraped["description"]
+        if fields.get("title"):
+            result["Live Titel"] = scraped["title"]
+        if fields.get("bullets"):
+            result["Live Bullet 1"] = bullets[0]
+            result["Live Bullet 2"] = bullets[1]
+            result["Live Bullet 3"] = bullets[2]
+            result["Live Bullet 4"] = bullets[3]
+            result["Live Bullet 5"] = bullets[4]
+        if fields.get("desc"):
+            result["Beschreibung"] = scraped["description"]
+        if fields.get("ratings"):
+            result["Anzahl Bewertungen"] = scraped["review_count"]
+            result["Bewertungsschnitt"] = scraped["review_avg"]
+        if fields.get("offer"):
+            result["Preis"] = scraped["price"]
+            result["Verkäufer"] = scraped["verkaeufer"]
+        if fields.get("media"):
+            result["Galeriebilder"] = scraped["image_count"]
+            result["A+ Content"] = "Ja" if scraped["has_aplus"] else "Nein"
 
-    if fields.get("ratings"):
-        result["Anzahl Bewertungen"] = scraped["review_count"]
-        result["Bewertungsschnitt"] = scraped["review_avg"]
+        if fields.get("cosmo"):
+            try:
+                evaluation = evaluate_cosmo(client, model, resolved_asin,
+                                            scraped["title"], scraped["bullets"])
+            except Exception as e:
+                return {"display_id": display_id, "ASIN": asin, "EAN": ean,
+                        "success": False, "error": f"Bewertungs-Fehler: {e}"}
+            total = (evaluation.score_produktidentitaet + evaluation.score_eigenschaften +
+                     evaluation.score_verwendungskontext + evaluation.score_zielgruppe_anlass +
+                     evaluation.score_format + evaluation.score_policy)
+            gesamt = max(1, min(12, total))
+            result["evaluation"] = evaluation
+            result["gesamt_score"] = gesamt
+            result["COSMO Score"] = (
+                f"{gesamt}/12 | "
+                f"Produktidentität: {evaluation.score_produktidentitaet}/2 · "
+                f"Eigenschaften: {evaluation.score_eigenschaften}/2 · "
+                f"Verwendungskontext: {evaluation.score_verwendungskontext}/2 · "
+                f"Zielgruppe & Anlass: {evaluation.score_zielgruppe_anlass}/2 · "
+                f"Format & Länge: {evaluation.score_format}/2 · "
+                f"Policy: {evaluation.score_policy}/2"
+            )
+            result["Empfehlungen"] = evaluation.empfehlung
 
-    if fields.get("offer"):
-        result["Preis"] = scraped["price"]
-        result["Verkäufer"] = scraped["verkaeufer"]
-
-    if fields.get("media"):
-        result["Galeriebilder"] = scraped["image_count"]
-        result["A+ Content"] = "Ja" if scraped["has_aplus"] else "Nein"
-
-    if fields.get("cosmo"):
-        try:
-            evaluation = evaluate_cosmo(client, model, resolved_asin, scraped["title"], scraped["bullets"])
-        except Exception as e:
-            return {"asin": asin, "is_ean": is_ean, "success": False,
-                    "error": f"Bewertungs-Fehler: {e}", "scraped": scraped}
-        total = (evaluation.score_produktidentitaet +
-                 evaluation.score_eigenschaften +
-                 evaluation.score_verwendungskontext +
-                 evaluation.score_zielgruppe_anlass +
-                 evaluation.score_format)
-        gesamt = max(1, min(10, total))
-        result["evaluation"] = evaluation
-        result["gesamt_score"] = gesamt
-        result["COSMO Score"] = (
-            f"{gesamt}/10 | "
-            f"Produktidentität: {evaluation.score_produktidentitaet}/2 · "
-            f"Eigenschaften: {evaluation.score_eigenschaften}/2 · "
-            f"Verwendungskontext: {evaluation.score_verwendungskontext}/2 · "
-            f"Zielgruppe & Anlass: {evaluation.score_zielgruppe_anlass}/2 · "
-            f"Format: {evaluation.score_format}/2"
-        )
-        result["Empfehlungen"] = evaluation.empfehlung
-
-    if fields.get("idealo") and is_ean:
-        idealo = scrape_idealo_ean(asin)
+    # ── Idealo-Abfrage (nur wenn EAN vorhanden und Checkbox aktiv) ────────────
+    if fields.get("idealo") and ean:
+        idealo = scrape_idealo_ean(ean)
         result["Idealo Preis"] = idealo["idealo_price"]
         result["Idealo Verkäufer"] = idealo["idealo_seller"]
 
@@ -227,7 +269,7 @@ def main():
     st.sidebar.title("ASIN Auditor")
 
     st.title("🔍 ASIN Auditor — COSMO Listing-Bewertung")
-    st.caption("Crawlt Amazon-Produktseiten und bewertet Listings nach COSMO/RUFUS-Regeln (1–10)")
+    st.caption("Crawlt Amazon-Produktseiten und bewertet Listings nach COSMO/RUFUS-Regeln (1–12): COSMO-Dimensionen, Byte-Längen & Amazon Policy")
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -312,36 +354,64 @@ def main():
         st.error("❌ Keine Spalte 'ASIN' oder 'EAN' gefunden.")
         return
 
-    col = "ASIN" if "ASIN" in df.columns else "EAN"
-    raw = df[col].dropna().astype(str).str.strip().str.upper().unique().tolist()
+    has_asins_col = "ASIN" in df.columns
+    has_eans_col  = "EAN"  in df.columns
 
-    asins = [v for v in raw if not v.isdigit() and 8 <= len(v) <= 12]
-    eans  = [v for v in raw if v.isdigit() and 8 <= len(v) <= 14]
-    identifiers = asins + eans
+    if has_asins_col and has_eans_col:
+        items = []
+        for _, row in df.iterrows():
+            asin = str(row.get("ASIN", "") or "").strip().upper()
+            ean  = str(row.get("EAN",  "") or "").strip().upper()
+            asin = asin if (asin and not asin.isdigit() and 8 <= len(asin) <= 12) else ""
+            ean  = ean  if (ean  and ean.isdigit()      and 8 <= len(ean)  <= 14) else ""
+            if asin or ean:
+                items.append({"asin": asin, "ean": ean})
+        mode = "both"
+    elif has_asins_col:
+        raw   = df["ASIN"].dropna().astype(str).str.strip().str.upper().unique()
+        items = [{"asin": v, "ean": ""} for v in raw if not v.isdigit() and 8 <= len(v) <= 12]
+        mode  = "asin"
+    else:
+        raw   = df["EAN"].dropna().astype(str).str.strip().str.upper().unique()
+        items = [{"asin": "", "ean": v} for v in raw if v.isdigit() and 8 <= len(v) <= 14]
+        mode  = "ean"
 
-    if not identifiers:
-        st.warning(f"Keine gültigen ASINs oder EANs in der Spalte '{col}' gefunden.")
+    if not items:
+        st.warning("Keine gültigen ASINs oder EANs gefunden.")
         return
 
-    label = "ASINs" if not eans else ("EANs" if not asins else "ASINs/EANs")
+    label     = {"asin": "ASINs",    "ean": "EANs",             "both": "Produkte"}[mode]
+    mode_info = {
+        "asin": "Nur ASINs erkannt → Amazon-Scraping",
+        "ean":  "Nur EANs erkannt → Idealo-Abfrage (kein Amazon-Scraping)",
+        "both": "ASINs + EANs erkannt → Amazon-Scraping (ASIN) + optionale Idealo-Abfrage (EAN)",
+    }[mode]
+    st.success(f"**{len(items)} {label}** geladen. {mode_info}")
 
-    st.success(f"**{len(identifiers)} {label}** geladen.")
+    if len(items) == 1:
+        num_to_scrape = st.number_input(
+            f"Anzahl {label} analysieren",
+            min_value=1,
+            max_value=1,
+            value=1,
+            help=f"Wähle wie viele {label} (von oben) analysiert werden sollen.",
+        )
+    else:
+        num_to_scrape = st.slider(
+            f"Anzahl {label} analysieren",
+            min_value=1,
+            max_value=len(items),
+            value=min(10, len(items)),
+            help=f"Wähle wie viele {label} (von oben) analysiert werden sollen.",
+        )
+    items = items[:num_to_scrape]
 
-    num_to_scrape = st.slider(
-        f"Anzahl {label} scrapen",
-        min_value=1,
-        max_value=len(identifiers),
-        value=min(10, len(identifiers)),
-        help=f"Wähle wie viele {label} (aus der Liste, von oben) analysiert werden sollen.",
-    )
-    identifiers = identifiers[:num_to_scrape]
-
-    st.info(f"**{len(identifiers)} {label}** werden auf **{marketplace}** gecrawlt.")
+    st.info(f"**{len(items)} {label}** werden auf **{marketplace}** analysiert.")
 
     if not fields.get("cosmo"):
         st.info("ℹ️ COSMO-Analyse deaktiviert — kein API Key erforderlich.")
 
-    if not st.button(f"🚀 {len(identifiers)} {label} analysieren",
+    if not st.button(f"🚀 {len(items)} {label} analysieren",
                      disabled=(fields.get("cosmo") and not api_key)):
         if fields.get("cosmo") and not api_key:
             st.warning("Bitte API Key in der Sidebar eingeben (für COSMO-Analyse benötigt).")
@@ -361,15 +431,16 @@ def main():
         with results_lock:
             all_results.append(r)
             completed[0] += 1
-            progress.progress(completed[0] / len(identifiers))
-            status_text.text(f"✅ {completed[0]}/{len(identifiers)} verarbeitet...")
+            progress.progress(completed[0] / len(items))
+            status_text.text(f"✅ {completed[0]}/{len(items)} verarbeitet...")
 
+        display_id = r.get("display_id", r.get("ASIN", r.get("EAN", "?")))
         if r["success"]:
             score = r.get("gesamt_score")
-            score_label = f"{score}/10" if score is not None else "—"
-            icon = "🟢" if isinstance(score, int) and score >= 7 else "🟡" if isinstance(score, int) and score >= 4 else ("🔴" if isinstance(score, int) else "⚪")
+            score_label = f"{score}/12" if score is not None else "—"
+            icon = "🟢" if isinstance(score, int) and score >= 9 else "🟡" if isinstance(score, int) and score >= 6 else ("🔴" if isinstance(score, int) else "⚪")
             title_preview = r.get("title", "")[:60]
-            with st.expander(f"{icon} {r['asin']} — {title_preview}...{(' (Score: ' + score_label + ')') if score is not None else ''}"):
+            with st.expander(f"{icon} {display_id} — {title_preview}...{(' (Score: ' + score_label + ')') if score is not None else ''}"):
                 cols = st.columns(4)
                 if fields.get("cosmo"):
                     cols[0].metric("COSMO Score", score_label)
@@ -381,21 +452,23 @@ def main():
                 if fields.get("cosmo"):
                     st.write("**💡 Empfehlungen:**", r.get("Empfehlungen", ""))
         else:
-            st.error(f"❌ {r['asin']}: {r.get('error', 'Unbekannter Fehler')}")
+            st.error(f"❌ {display_id}: {r.get('error', 'Unbekannter Fehler')}")
 
     try:
         with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
             futures = {
-                executor.submit(process_asin, ident, base_url, client, active_model, fields): ident
-                for ident in identifiers
+                executor.submit(process_item, item["asin"], item["ean"], base_url, client, active_model, fields): item
+                for item in items
             }
             for future in as_completed(futures):
-                ident = futures[future]
+                item = futures[future]
+                item_id = item["asin"] or item["ean"]
                 try:
                     on_result(future.result())
                 except Exception as e:
-                    logger.error(f"on_result error for {ident}: {traceback.format_exc()}")
-                    on_result({"asin": ident, "success": False, "error": str(e)})
+                    logger.error(f"on_result error for {item_id}: {traceback.format_exc()}")
+                    on_result({"display_id": item_id, "ASIN": item["asin"], "EAN": item["ean"],
+                               "success": False, "error": str(e)})
     except Exception as e:
         logger.error(f"Executor error: {traceback.format_exc()}")
         st.error(f"Fehler bei der Analyse: {e}")
@@ -411,8 +484,14 @@ def main():
         st.warning("Keine Ergebnisse zum Exportieren.")
         return
 
-    has_ean_input = any(r.get("is_ean") for r in success_results)
-    first_cols = ["EAN", "ASIN"] if has_ean_input else ["ASIN"]
+    has_ean_col  = any(r.get("EAN")  for r in success_results)
+    has_asin_col = any(r.get("ASIN") for r in success_results)
+    if has_ean_col and has_asin_col:
+        first_cols = ["EAN", "ASIN"]
+    elif has_ean_col:
+        first_cols = ["EAN"]
+    else:
+        first_cols = ["ASIN"]
     optional_cols = []
     if fields.get("title"):
         optional_cols += ["Live Titel"]
