@@ -316,14 +316,8 @@ def main():
             "idealo":  field_idealo,
         }
 
-    # ── File Upload ───────────────────────────────────────────────────────────
-    st.subheader("📂 ASINs oder EANs hochladen")
-    st.caption("Die Datei muss eine Spalte mit dem Header **ASIN** oder **EAN** enthalten.")
-    uploaded_file = st.file_uploader("CSV oder XLSX hochladen", type=["csv", "xlsx"])
-
-    if not uploaded_file:
-        st.info("Lade eine Datei mit einer Spalte 'ASIN' oder 'EAN' hoch um zu starten.")
-        return
+    # ── Input: Freitext + File Upload ─────────────────────────────────────────
+    st.subheader("📂 ASINs oder EANs eingeben")
 
     def _normalize_cols(frame):
         frame.columns = frame.columns.str.strip().str.lstrip('\ufeff')
@@ -332,53 +326,105 @@ def main():
             frame.rename(columns=col_map, inplace=True)
         return frame
 
-    try:
-        if uploaded_file.name.endswith(".csv"):
-            df = _normalize_cols(pd.read_csv(uploaded_file))
-        else:
-            xl = pd.ExcelFile(uploaded_file)
-            df = None
-            for sheet in xl.sheet_names:
-                candidate = _normalize_cols(xl.parse(sheet))
-                if "ASIN" in candidate.columns or "EAN" in candidate.columns:
-                    df = candidate
-                    break
-            if df is None:
-                df = _normalize_cols(xl.parse(xl.sheet_names[0]))
-    except Exception as e:
-        st.error(f"Fehler beim Laden der Datei: {e}")
-        return
+    def _parse_freetext(text: str) -> list:
+        result = []
+        for line in text.splitlines():
+            v = line.strip().upper()
+            if not v:
+                continue
+            if not v.isdigit() and 8 <= len(v) <= 12:
+                result.append({"asin": v, "ean": ""})
+            elif v.isdigit() and 8 <= len(v) <= 14:
+                result.append({"asin": "", "ean": v})
+        return result
 
-    # ── EAN → ASIN conversion ─────────────────────────────────────────────────
-    if "ASIN" not in df.columns and "EAN" not in df.columns:
-        st.error("❌ Keine Spalte 'ASIN' oder 'EAN' gefunden.")
-        return
+    with st.container(border=True):
+        asin_text_raw = st.text_area(
+            "ASINs oder EANs (eine pro Zeile)",
+            placeholder="B09XMKL2RD\nB09XMKL3QS\nB09XMKL4PT",
+            height=140,
+        )
+        st.caption("Oder CSV/XLSX mit ASIN- bzw. EAN-Spalte hochladen:")
+        uploaded_file = st.file_uploader(
+            "CSV oder XLSX hochladen",
+            type=["csv", "xlsx"],
+            label_visibility="collapsed",
+        )
 
-    has_asins_col = "ASIN" in df.columns
-    has_eans_col  = "EAN"  in df.columns
+    items_from_text = _parse_freetext(asin_text_raw) if asin_text_raw.strip() else []
 
-    if has_asins_col and has_eans_col:
-        items = []
-        for _, row in df.iterrows():
-            asin = str(row.get("ASIN", "") or "").strip().upper()
-            ean  = str(row.get("EAN",  "") or "").strip().upper()
-            asin = asin if (asin and not asin.isdigit() and 8 <= len(asin) <= 12) else ""
-            ean  = ean  if (ean  and ean.isdigit()      and 8 <= len(ean)  <= 14) else ""
-            if asin or ean:
-                items.append({"asin": asin, "ean": ean})
-        mode = "both"
-    elif has_asins_col:
-        raw   = df["ASIN"].dropna().astype(str).str.strip().str.upper().unique()
-        items = [{"asin": v, "ean": ""} for v in raw if not v.isdigit() and 8 <= len(v) <= 12]
-        mode  = "asin"
-    else:
-        raw   = df["EAN"].dropna().astype(str).str.strip().str.upper().unique()
-        items = [{"asin": "", "ean": v} for v in raw if v.isdigit() and 8 <= len(v) <= 14]
-        mode  = "ean"
+    items_from_file = []
+    file_error = None
+    if uploaded_file:
+        try:
+            if uploaded_file.name.endswith(".csv"):
+                raw_bytes = uploaded_file.read()
+                df = None
+                for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+                    try:
+                        df = _normalize_cols(pd.read_csv(io.BytesIO(raw_bytes), encoding=enc))
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        continue
+                if df is None:
+                    raise ValueError("CSV-Encoding konnte nicht erkannt werden (versucht: utf-8, cp1252, latin-1)")
+            else:
+                xl = pd.ExcelFile(uploaded_file)
+                df = None
+                for sheet in xl.sheet_names:
+                    candidate = _normalize_cols(xl.parse(sheet))
+                    if "ASIN" in candidate.columns or "EAN" in candidate.columns:
+                        df = candidate
+                        break
+                if df is None:
+                    df = _normalize_cols(xl.parse(xl.sheet_names[0]))
+
+            if "ASIN" not in df.columns and "EAN" not in df.columns:
+                file_error = "❌ Keine Spalte 'ASIN' oder 'EAN' in der Datei gefunden."
+            elif "ASIN" in df.columns and "EAN" in df.columns:
+                for _, row in df.iterrows():
+                    asin = str(row.get("ASIN", "") or "").strip().upper()
+                    ean  = str(row.get("EAN",  "") or "").strip().upper()
+                    asin = asin if (asin and not asin.isdigit() and 8 <= len(asin) <= 12) else ""
+                    ean  = ean  if (ean  and ean.isdigit()      and 8 <= len(ean)  <= 14) else ""
+                    if asin or ean:
+                        items_from_file.append({"asin": asin, "ean": ean})
+            elif "ASIN" in df.columns:
+                for v in df["ASIN"].dropna().astype(str).str.strip().str.upper().unique():
+                    if not v.isdigit() and 8 <= len(v) <= 12:
+                        items_from_file.append({"asin": v, "ean": ""})
+            else:
+                for v in df["EAN"].dropna().astype(str).str.strip().str.upper().unique():
+                    if v.isdigit() and 8 <= len(v) <= 14:
+                        items_from_file.append({"asin": "", "ean": v})
+        except Exception as e:
+            file_error = f"Fehler beim Laden der Datei: {e}"
+
+    if file_error:
+        st.error(file_error)
+
+    # Zusammenfuehren, Duplikate entfernen
+    seen_keys: set = set()
+    items = []
+    for item in items_from_text + items_from_file:
+        key = item["asin"] or item["ean"]
+        if key not in seen_keys:
+            seen_keys.add(key)
+            items.append(item)
 
     if not items:
-        st.warning("Keine gültigen ASINs oder EANs gefunden.")
+        if not asin_text_raw.strip() and not uploaded_file:
+            st.info("ASINs oben eintragen oder eine Datei hochladen um zu starten.")
         return
+
+    has_asins = any(i["asin"] for i in items)
+    has_eans  = any(i["ean"]  for i in items)
+    if has_asins and has_eans:
+        mode = "both"
+    elif has_asins:
+        mode = "asin"
+    else:
+        mode = "ean"
 
     label     = {"asin": "ASINs",    "ean": "EANs",             "both": "Produkte"}[mode]
     mode_info = {
