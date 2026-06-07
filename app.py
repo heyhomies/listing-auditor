@@ -80,10 +80,13 @@ Bezieht sich auf: used_for, used_in, used_with, enables_activity
 **DIMENSION 4 – Zielgruppe & Anlass [0-2]**
 Bezieht sich auf: used_by, targets_audience, occasion, has_style, associated_with
 → Zielgruppe (z.B. Familien, Profis), Anlass (z.B. Alltag, Weihnachten), Stil, thematische Einordnung?
+⚠️ WICHTIG: Nur bewerten wenn für dieses Produkt relevant. Bei technischen Produkten, Industriewerkzeug oder Produkten ohne klare Zielgruppe/Anlass: Dimension kann trotzdem 2 Punkte erhalten wenn Verwendungskontext (Dimension 3) gut abgedeckt ist. Nicht erzwingen was nicht zum Produkt passt.
+Verteilung: Zielgruppe & Anlass gehören primär in die Bullet Points. Im Titel nur wenn dort Platz fehlt (Titel deutlich unter 170 Bytes) UND alle wichtigeren COSMO-Typen (Eigenschaften, Material, Größe) bereits vollständig abgedeckt sind.
 
 **DIMENSION 5 – Format, Struktur & Länge [0-2]**
 → Titel: Sinnvolle Struktur (Marke + Produktart + Eigenschaften)? Kein reines Keyword-Stuffing?
    Titellänge im Optimum (170–200 Bytes)? − 1 Punkt wenn deutlich zu kurz (<120B) oder zu lang (>230B)
+   Titelpriorität: Eigenschaften/Material/Größe > Verwendungskontext > Zielgruppe/Anlass
 → Bullets: Beginnen mit informativen Hook in Großbuchstaben (HOOK: Satz)? Vollständige Sätze?
    Bullet-Längen überwiegend im Optimum (170–200 Bytes)?
 - 2 = Struktur gut, Längen großteils im Zielbereich
@@ -102,9 +105,11 @@ Bezieht sich auf: used_by, targets_audience, occasion, has_style, associated_wit
 
 🔧 EMPFEHLUNG (empfehlung):
 Fasse die wichtigsten Verbesserungsmaßnahmen in 2-4 prägnanten Sätzen zusammen.
-Decke dabei die relevantesten Bereiche ab: Titel, Bullets, Backend-Felder und ggf. A+/Bilder.
+Priorität: Benenne zuerst die fehlenden COSMO-Beziehungstypen (z.B. fehlendes Material, fehlender Verwendungskontext, fehlende Zertifikate) — nicht pauschal "Titel zu kurz → Zielgruppe ergänzen".
+Zielgruppe & Anlass: Empfehle sie primär für Bullets; nur für den Titel vorschlagen wenn dort wirklich Platz fehlt UND alle wichtigeren Informationen (Material, Größe, Eigenschaften) bereits enthalten sind.
+Backend-Felder (Intended Use, Target Audience, Occasion): Nur erwähnen wenn sie für das Produkt relevant sind; formuliere als "sofern im Backend verfügbar".
 Schreibe direkt und produktspezifisch — keine allgemeinen Floskeln.
-Beispiel: "Der Titel sollte Material und Zielgruppe ergänzen. In den Bullets fehlen Angaben zur Spülmaschinenfestigkeit und Kompatibilität mit Induktionsherden. Die Backend-Felder Intended Use und Target Audience sollten befüllt werden. A+ Content würde die Conversion deutlich verbessern."
+Beispiel: "Der Titel fehlt die Materialangabe (304-Edelstahl) und das Fassungsvermögen — beides ist kaufentscheidend und sollte ergänzt werden. In den Bullets fehlt ein dedizierter Slot für Zielgruppe & Anlass (z.B. Heimbar, Geschenk für Cocktail-Enthusiasten). A+ Content mit Maßzeichnung würde die Conversion steigern."
 
 ⚠️ Maximal 4 Sätze, präzise und umsetzbar.
 """
